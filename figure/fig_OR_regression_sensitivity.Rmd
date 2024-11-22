@@ -1,0 +1,356 @@
+```{r}
+library(tidyverse)
+library(gam)
+library(gridExtra)
+```
+
+
+
+#Squared
+```{r}
+fit_models <- function(df) {
+  list(
+    "Untransformed Misspecified Logit" = glm(
+      formula = eventstatus ~ immunity_model,
+      data = df,
+      family = binomial(link = "logit")
+    ),
+    "Transformed Misspecified Logit" = glm(
+      formula = eventstatus ~ log(1-immunity_model),
+      data = df,
+      family = binomial(link = "logit")
+    ),
+    "Transformed Logit" = glm(
+      formula = eventstatus ~ log(1-immunity_model^2),
+      data = df,
+      family = binomial(link = "logit")
+    ),
+    "Untransformed Misspecified GAM" = gam(
+      formula = eventstatus ~ s(immunity_model, 5),
+      data = df,
+      family = binomial(link = "logit")
+    ),
+    "Transformed Misspecified GAM" = gam(
+      formula = eventstatus ~ s(log(1-immunity_model), 5),
+      data = df,
+      family = binomial(link = "logit")
+    ),
+    "Transformed GAM" = gam(
+      formula = eventstatus ~ s(log(1-immunity_model^2), 5),
+      data = df,
+      family = binomial(link = "logit")
+    )
+  )
+}
+```
+
+```{r}
+steps <- seq(500,600,10)
+results_list <- lapply(steps, function(step) {
+  file_path <- paste0("50000_simulation_1028_squared_", step, ".csv")
+  df_original <- read.csv(file_path)
+  df_original$day <- step
+
+  df_infectious <- subset(df_original, 
+                          (status == "infectious") &
+                            (Symptomatic == 1) &
+                            (immunity_model != 1))
+  
+  df_uninfected <- subset(df_original, 
+                          (immunity_model != 1) & 
+                            (
+                          (status == "susceptible")
+                          |
+                            (status == "exposed")
+                          |
+                            (status == "recovered"))
+  )
+
+  list(infectious = df_infectious, uninfected = df_uninfected)
+})
+
+infectious_data <- do.call(rbind, lapply(results_list, `[[`, "infectious"))
+uninfected_data <- do.call(rbind, lapply(results_list, `[[`, "uninfected"))
+```
+
+```{r}
+sample_data <- function(infectious_data, uninfected_data) {
+  
+  n_match <- 4
+  final_data <- data.frame()
+  
+
+  unique_days <- unique(infectious_data$day)
+  
+
+  for (day in unique_days) {
+    # Filter data for the current day
+    day_infected <- infectious_data[infectious_data$day == day, ]
+    day_uninfected <- uninfected_data[uninfected_data$day == day, ]
+    
+    # Calculate the number of infected for the current day
+    num_infected <- nrow(day_infected)
+    
+    # Sample uninfected data
+    if (nrow(day_uninfected) > num_infected * n_match) {
+      sampled_uninfected <- day_uninfected[sample(nrow(day_uninfected), num_infected * n_match, replace = FALSE), ]
+    } else {
+      sampled_uninfected <- day_uninfected
+    }
+    
+    day_data <- rbind(day_infected, sampled_uninfected)
+    
+    final_data <- rbind(final_data, day_data)
+  }
+  
+  return(final_data)
+}
+
+df <- sample_data(infectious_data, uninfected_data)
+fits <- fit_models(df)
+```
+
+## Plot odds ratio
+```{r}
+newdf <- data.frame(immunity_model = seq(0, 1, 0.01))
+
+newdf$Truth <- 1 - newdf$immunity_model^2
+
+p <-
+  lapply(fits, function(x) 
+    exp(predict(x, newdata = newdf)) / 
+      exp(predict(x, newdata = transform(newdf, immunity_model = 0))))
+newdf <- bind_cols(newdf, p)
+
+odds_ratio_squared <- newdf %>%
+  pivot_longer(cols = -immunity_model, names_to = "name", values_to = "value") %>%
+  mutate(
+    name = factor(name, levels = c("Truth", 
+                                    "Untransformed Misspecified Logit", 
+                                    "Transformed Misspecified Logit",
+                                    "Transformed Logit", 
+                                    "Untransformed Misspecified GAM", 
+                                    "Transformed Misspecified GAM",
+                                    "Transformed GAM"))
+  ) %>%
+  ggplot(aes(x = immunity_model, y = value, color = name, linetype = name)) +
+    geom_line(linewidth = 1) +
+    theme_minimal() +
+    scale_color_manual(
+      name = "Model", 
+      values = c(
+        "Untransformed Misspecified Logit" = "#66C2A5", 
+        "Transformed Misspecified Logit" = "#A6D854",
+        "Transformed Logit" = "#FC8D62", 
+        "Untransformed Misspecified GAM" = "#8DA0CB", 
+        "Transformed Misspecified GAM" = "#FFD92F",
+        "Transformed GAM" = "#E78AC3", 
+        "Truth" = "#000000"
+      )
+    ) +
+    scale_linetype_manual(
+      name = "Model", 
+      values = c(
+        "Untransformed Misspecified Logit" = "longdash", 
+        "Transformed Misspecified Logit" = "longdash",
+        "Transformed Logit" = "dashed", 
+        "Untransformed Misspecified GAM" = "dotdash", 
+        "Transformed Misspecified GAM" = "dotdash",
+        "Transformed GAM" = "twodash", 
+        "Truth" = "solid"
+      )
+    ) +
+  labs(
+    x = "Antibody level",
+    y = "Incidence rate ratio"
+  ) +
+  theme(
+    text = element_text(size = 12), 
+    axis.title = element_text(size = 12), 
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12) 
+  )+
+  scale_y_continuous(labels = scales::label_number(scale = 1, accuracy = 0.001))
+odds_ratio_squared
+```
+
+
+```{r}
+infection_metrics_plot <- grid.arrange(risk, relative_risk,
+                                       odds, odds_ratio, nrow = 2)
+ggsave("squared_infection_metrics_plot.svg", plot = infection_metrics_plot, width = 13, height = 8)
+```
+
+#Cubic
+```{r}
+fit_models <- function(df) {
+  list(
+    "Untransformed Misspecified Logit" = glm(
+      formula = eventstatus ~ immunity_model,
+      data = df,
+      family = binomial(link = "logit")
+    ),
+    "Transformed Misspecified Logit" = glm(
+      formula = eventstatus ~ log(1-immunity_model),
+      data = df,
+      family = binomial(link = "logit")
+    ),
+    "Transformed Logit" = glm(
+      formula = eventstatus ~ log(1-immunity_model^3),
+      data = df,
+      family = binomial(link = "logit")
+    ),
+    "Untransformed Misspecified GAM" = gam(
+      formula = eventstatus ~ s(immunity_model, 5),
+      data = df,
+      family = binomial(link = "logit")
+    ),
+    "Transformed Misspecified GAM" = gam(
+      formula = eventstatus ~ s(log(1-immunity_model), 5),
+      data = df,
+      family = binomial(link = "logit")
+    ),
+    "Transformed GAM" = gam(
+      formula = eventstatus ~ s(log(1-immunity_model^3), 5),
+      data = df,
+      family = binomial(link = "logit")
+    )
+  )
+}
+```
+
+```{r}
+steps <- seq(500,600,10)
+results_list <- lapply(steps, function(step) {
+  file_path <- paste0("50000_simulation_1028_cubic_", step, ".csv")
+  df_original <- read.csv(file_path)
+  df_original$day <- step
+  
+  df_infectious <- subset(df_original, 
+                          (status == "infectious") &
+                            (Symptomatic == 1) &
+                            (immunity_model != 1))
+  
+  df_uninfected <- subset(df_original, 
+                          (immunity_model != 1) & 
+                            (
+                          (status == "susceptible")
+                          |
+                            (status == "exposed")
+                          |
+                            (status == "recovered"))
+  )
+
+  list(infectious = df_infectious, uninfected = df_uninfected)
+})
+
+infectious_data <- do.call(rbind, lapply(results_list, `[[`, "infectious"))
+uninfected_data <- do.call(rbind, lapply(results_list, `[[`, "uninfected"))
+```
+
+```{r}
+sample_data <- function(infectious_data, uninfected_data) {
+  
+  n_match <- 4
+  final_data <- data.frame()
+  
+  # Get unique days from infectious data
+  unique_days <- unique(infectious_data$day)
+  
+  # Loop through each unique day
+  for (day in unique_days) {
+    # Filter data for the current day
+    day_infected <- infectious_data[infectious_data$day == day, ]
+    day_uninfected <- uninfected_data[uninfected_data$day == day, ]
+    
+    num_infected <- nrow(day_infected)
+    
+    if (nrow(day_uninfected) > num_infected * n_match) {
+      sampled_uninfected <- day_uninfected[sample(nrow(day_uninfected), num_infected * n_match, replace = FALSE), ]
+    } else {
+      sampled_uninfected <- day_uninfected
+    }
+
+    day_data <- rbind(day_infected, sampled_uninfected)
+    
+    final_data <- rbind(final_data, day_data)
+  }
+  
+  return(final_data)
+}
+
+df <- sample_data(infectious_data, uninfected_data)
+fits <- fit_models(df)
+```
+
+## Plot odds ratio
+```{r}
+newdf <- data.frame(immunity_model = seq(0, 1, 0.01))
+
+newdf$Truth <- 1 - newdf$immunity_model^3
+
+p <-
+  lapply(fits, function(x) 
+    exp(predict(x, newdata = newdf)) / 
+      exp(predict(x, newdata = transform(newdf, immunity_model = 0))))
+newdf <- bind_cols(newdf, p)
+
+odds_ratio_cubic <- newdf %>%
+  pivot_longer(cols = -immunity_model, names_to = "name", values_to = "value") %>%
+  mutate(
+    name = factor(name, levels = c("Truth", 
+                                    "Untransformed Misspecified Logit", 
+                                    "Transformed Misspecified Logit",
+                                    "Transformed Logit", 
+                                    "Untransformed Misspecified GAM", 
+                                    "Transformed Misspecified GAM",
+                                    "Transformed GAM"))
+  ) %>%
+  ggplot(aes(x = immunity_model, y = value, color = name, linetype = name)) +
+    geom_line(linewidth = 1) +
+    theme_minimal() +
+    scale_color_manual(
+      name = "Model", 
+      values = c(
+        "Untransformed Misspecified Logit" = "#66C2A5", 
+        "Transformed Misspecified Logit" = "#A6D854",
+        "Transformed Logit" = "#FC8D62", 
+        "Untransformed Misspecified GAM" = "#8DA0CB", 
+        "Transformed Misspecified GAM" = "#FFD92F",
+        "Transformed GAM" = "#E78AC3", 
+        "Truth" = "#000000"
+      )
+    ) +
+    scale_linetype_manual(
+      name = "Model", 
+      values = c(
+        "Untransformed Misspecified Logit" = "longdash", 
+        "Transformed Misspecified Logit" = "longdash",
+        "Transformed Logit" = "dashed", 
+        "Untransformed Misspecified GAM" = "dotdash", 
+        "Transformed Misspecified GAM" = "dotdash",
+        "Transformed GAM" = "twodash", 
+        "Truth" = "solid"
+      )
+    ) +
+  labs(
+    x = "Antibody level",
+    y = "Incidence rate ratio"
+  ) +
+  theme(
+    text = element_text(size = 12), 
+    axis.title = element_text(size = 12), 
+    axis.text = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12) 
+  )+
+  scale_y_continuous(labels = scales::label_number(scale = 1, accuracy = 0.001))
+odds_ratio_cubic
+```
+
+
+```{r}
+infection_metrics_plot <- grid.arrange(odds_ratio_squared,odds_ratio_cubic, nrow = 1)
+ggsave("sensitivity_OR.svg", plot = infection_metrics_plot, width = 15, height = 4)
+```
